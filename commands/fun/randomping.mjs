@@ -20,7 +20,8 @@ async function execute(interaction) {
     console.log(onlineMembers);
 
     // quiet ping a random user
-    await interaction.reply(`<@${randomOnlineMemberId}> meow`, { allowedMentions: { parse: [] } });
+    //await interaction.reply(`<@${randomOnlineMemberId}> meow`, { allowedMentions: { parse: [] } });
+    await interaction.reply(`<@${randomOnlineMemberId}> meow`);
 }
 
 export { data, execute };
