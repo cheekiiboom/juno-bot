@@ -9,7 +9,9 @@ const clientOptions = {
 	intents: [
 		GatewayIntentBits.Guilds,
 		GatewayIntentBits.GuildPresences,
-		GatewayIntentBits.GuildMembers
+		GatewayIntentBits.GuildMembers,
+		GatewayIntentBits.GuildMessages,
+		GatewayIntentBits.MessageContent
 	],
 	allowedMentions: {
 		parse: ['users', 'roles', 'everyone']
@@ -37,7 +39,7 @@ for (const folder of commandFolders) {
 	}
 }
 
-// Grab all the event files from the events directory
+// Initialize events
 const eventsPath = join(__dirname, 'events');
 const eventFiles = readdirSync(eventsPath).filter((file) => file.endsWith('.js'));
 
@@ -49,6 +51,18 @@ for (const file of eventFiles) {
 	} else {
 		client.on(event.name, (...args) => event.execute(...args));
 	}
+}
+
+// Initialize message handlers
+client.messageHandlers = new Collection();
+
+const handlersPath = join(__dirname, 'handlers/message');
+const handlerFiles = readdirSync(handlersPath).filter(file => file.endsWith('.js'));
+
+for (const file of handlerFiles) {
+    const filePath = join(handlersPath, file);
+    const handler = require(filePath);
+    client.messageHandlers.set(handler.name, handler);
 }
 
 // Log in to Discord with your client's token
