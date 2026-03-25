@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, AttachmentBuilder } from 'discord.js';
+import { SlashCommandBuilder, AttachmentBuilder, MessageFlags } from 'discord.js';
 import pkg from '@tonejs/midi';
 const { Midi } = pkg;
 import { readFileSync } from 'node:fs';
@@ -11,12 +11,13 @@ const SAMPLES_DIR = join(__dirname, '..', '..', 'assets', 'samples');
 const SAMPLE_RATE = 44100;
 const MAX_DURATION_SEC = 30;
 const MAX_NOTES = 2000;
+const MAX_MIDI_SIZE = 10 * 1024 * 1024; // 10 MB
 
 function midiToFreq(midi) {
     return 440 * Math.pow(2, (midi - 69) / 12);
 }
 
-const SAMPLES_RATE = 48000;
+const SOURCE_SAMPLE_RATE = 48000;
 
 const SAMPLE_FILES = [
     { file: 'Cat_idle2.wav',       baseFreq: 489.80 },
@@ -36,6 +37,7 @@ function parseWav(buf) {
         if (id === 'data') { dataOffset = i + 8; dataSize = size; break; }
         i += 8 + size;
     }
+    if (dataOffset === -1 || dataSize <= 0) throw new Error('WAV data chunk not found or empty');
     const totalSamples = dataSize / 2; // 16-bit = 2 bytes per sample
     const mono = new Float32Array(totalSamples);
     for (let s = 0; s < totalSamples; s++)
@@ -46,7 +48,8 @@ function parseWav(buf) {
 /** Resample and pitch-shift a sample to a target frequency using linear interpolation. */
 function pitchShift(samples, srcRate, targetFreq, baseFreq) {
     // Combined rate-conversion + pitch-shift into one pass
-    const playbackRate = (targetFreq / baseFreq) * (srcRate / SAMPLE_RATE);
+    // Clamp playbackRate to avoid extreme allocations from very low/high MIDI notes
+    const playbackRate = Math.max(0.1, Math.min(10, (targetFreq / baseFreq) * (srcRate / SAMPLE_RATE)));
     const outputLength = Math.floor(samples.length / playbackRate);
     const out = new Float32Array(outputLength);
     for (let i = 0; i < outputLength; i++) {
@@ -82,13 +85,20 @@ function encodeWav(floatBuffer) {
     return wav;
 }
 
-// Load all samples at startup
-const allSamples = SAMPLE_FILES.map(({ file, baseFreq }) => ({
-    samples: parseWav(readFileSync(join(SAMPLES_DIR, file))),
-    sampleRate: SAMPLES_RATE,
-    baseFreq,
-}));
-console.log(`[meowidi] loaded ${allSamples.length} samples`);
+// Lazily load samples on first use to avoid delaying bot startup
+let loadedSamples = null;
+
+function getSamples() {
+    if (!loadedSamples) {
+        loadedSamples = SAMPLE_FILES.map(({ file, baseFreq }) => ({
+            samples: parseWav(readFileSync(join(SAMPLES_DIR, file))),
+            sampleRate: SOURCE_SAMPLE_RATE,
+            baseFreq,
+        }));
+        console.log(`[meowidi] loaded ${loadedSamples.length} samples`);
+    }
+    return loadedSamples;
+}
 
 const data = new SlashCommandBuilder()
     .setName('meowidi')
@@ -100,16 +110,28 @@ const data = new SlashCommandBuilder()
     );
 
 async function fetchMidi(url) {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`download failed: ${res.status}`);
-    return new Midi(new Uint8Array(await res.arrayBuffer()));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000); // 10s timeout
+    try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) throw new Error(`download failed: ${res.status}`);
+        const contentLength = res.headers.get('content-length');
+        if (contentLength && parseInt(contentLength) > MAX_MIDI_SIZE)
+            throw new Error('MIDI file too large');
+        return new Midi(new Uint8Array(await res.arrayBuffer()));
+    } finally {
+        clearTimeout(timeout);
+    }
 }
 
 function extractNotes(midi) {
     const allNotes = midi.tracks.flatMap(t => t.notes);
     allNotes.sort((a, b) => a.time - b.time);
-    const notes = allNotes.filter(n => n.time < MAX_DURATION_SEC).slice(0, MAX_NOTES);
-    return { notes, allNotes };
+    const timeFiltered = allNotes.filter(n => n.time < MAX_DURATION_SEC);
+    const notes = timeFiltered.slice(0, MAX_NOTES);
+    const timeTruncated = timeFiltered.length < allNotes.length;
+    const noteTruncated = notes.length < timeFiltered.length;
+    return { notes, allNotes, timeTruncated, noteTruncated };
 }
 
 function renderNotes(notes, sample) {
@@ -117,11 +139,16 @@ function renderNotes(notes, sample) {
     const totalDuration = Math.min(lastNote.time + lastNote.duration + 1.0, MAX_DURATION_SEC);
     const outBuffer = new Float32Array(Math.ceil(SAMPLE_RATE * totalDuration));
     const fadeOutSamples = Math.floor(0.03 * SAMPLE_RATE); // 30ms fade-out to avoid clicks
+    const pitchCache = new Map();
 
     for (const note of notes) {
-        const pitched = pitchShift(sample.samples, sample.sampleRate, midiToFreq(note.midi), sample.baseFreq);
         const startSample = Math.floor(note.time * SAMPLE_RATE);
         const noteLenSamples = Math.floor(note.duration * SAMPLE_RATE);
+
+        if (!pitchCache.has(note.midi)) {
+            pitchCache.set(note.midi, pitchShift(sample.samples, sample.sampleRate, midiToFreq(note.midi), sample.baseFreq));
+        }
+        const pitched = pitchCache.get(note.midi);
         const len = Math.min(pitched.length, noteLenSamples, outBuffer.length - startSample);
         for (let i = 0; i < len; i++) {
             const fadeGain = i >= len - fadeOutSamples ? (len - i) / fadeOutSamples : 1;
@@ -146,17 +173,18 @@ async function execute(interaction) {
     const attachment = interaction.options.getAttachment('midi');
     const name = attachment.name.toLowerCase();
     if (!name.endsWith('.mid') && !name.endsWith('.midi')) {
-        await interaction.reply({ content: 'please give me a .mid or .midi file! :(', flags: 64 });
+        await interaction.reply({ content: 'please give me a .mid or .midi file! :(', flags: MessageFlags.Ephemeral });
         return;
     }
 
     await interaction.deferReply();
 
     try {
-        const sample = allSamples[Math.floor(Math.random() * allSamples.length)];
+        const samples = getSamples();
+        const sample = samples[Math.floor(Math.random() * samples.length)];
 
         const midi = await fetchMidi(attachment.url);
-        const { notes, allNotes } = extractNotes(midi);
+        const { notes, allNotes, timeTruncated, noteTruncated } = extractNotes(midi);
         if (notes.length === 0) {
             await interaction.editReply('no notes found in that Meow-IDI file :(');
             return;
@@ -167,8 +195,14 @@ async function execute(interaction) {
 
         const wavBuffer = encodeWav(outBuffer);
         const file = new AttachmentBuilder(wavBuffer, { name: 'meow.wav' });
-        const truncated = notes.length < allNotes.length;
-        const truncMsg = truncated ? ` (first ${MAX_NOTES} of ${allNotes.length} notes)` : '';
+        let truncMsg = '';
+        if (noteTruncated && timeTruncated) {
+            truncMsg = ` (first ${MAX_NOTES} of ${allNotes.length} notes, first ${MAX_DURATION_SEC}s)`;
+        } else if (noteTruncated) {
+            truncMsg = ` (first ${MAX_NOTES} of ${allNotes.length} notes)`;
+        } else if (timeTruncated) {
+            truncMsg = ` (first ${MAX_DURATION_SEC}s of song)`;
+        }
         await interaction.editReply({
             content: `meow! converted ${notes.length} notes${truncMsg} :3`,
             files: [file],
