@@ -1,9 +1,12 @@
-const { readdirSync } = require('node:fs');
-const { join } = require('node:path');
-const { Client, Collection, GatewayIntentBits } = require('discord.js');
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { Client, Collection, GatewayIntentBits } from 'discord.js';
+import { config } from 'dotenv';
+
+import { __dirname, getExportsFromModule } from './utils/filesystem.js';
 
 // Configure dotenv
-require('dotenv').config({ quiet: true });
+config({ quiet: true });
 
 const clientOptions = {
 	intents: [
@@ -21,33 +24,33 @@ const clientOptions = {
 // Create a new client instance
 const client = new Client(clientOptions);
 
-
-
+// Initialize commands
 client.commands = new Collection();
 const foldersPath = join(__dirname, 'commands');
 const commandFolders = readdirSync(foldersPath);
+
 for (const folder of commandFolders) {
 	const commandsPath = join(foldersPath, folder);
-	const commandFiles = readdirSync(commandsPath).filter((file) => file.endsWith('.mjs') && !file.startsWith('_'));
+	const commandFiles = readdirSync(commandsPath).filter(file => file.endsWith('.js') && !file.startsWith('_'));
 	for (const file of commandFiles) {
 		const filePath = join(commandsPath, file);
-		const command = require(filePath);
+		const command = await getExportsFromModule(filePath);
 		// Set a new item in the Collection with the key as the command name and the value as the exported module
 		if ('data' in command && 'execute' in command) {
 			client.commands.set(command.data.name, command);
 		} else {
-			console.log(`[WARNING] The command at ${filePath} is missing a required "data" or "execute" property.`);
+			console.warn(`[WARNING] The command at ${filePath} is missing a required "data" or "execute" property.`);
 		}
 	}
 }
 
 // Initialize events
 const eventsPath = join(__dirname, 'events');
-const eventFiles = readdirSync(eventsPath).filter((file) => file.endsWith('.js'));
+const eventFiles = readdirSync(eventsPath).filter(file => file.endsWith('.js'));
 
 for (const file of eventFiles) {
 	const filePath = join(eventsPath, file);
-	const event = require(filePath);
+	const event = await getExportsFromModule(filePath);
 	if (event.once) {
 		client.once(event.name, (...args) => event.execute(...args));
 	} else {
@@ -62,12 +65,11 @@ const handlersPath = join(__dirname, 'handlers/message');
 const handlerFiles = readdirSync(handlersPath).filter(file => file.endsWith('.js'));
 
 for (const file of handlerFiles) {
-    const filePath = join(handlersPath, file);
-    const handler = require(filePath);
-    client.messageHandlers.set(handler.name, handler);
+	const filePath = join(handlersPath, file);
+	const handler = await getExportsFromModule(filePath);
+	client.messageHandlers.set(handler.name, handler);
 }
 
 // Log in to Discord with your client's token
-const token = process.env.DISCORD_JUNO_TOKEN;
-
+const token = process.env.DISCORD_BOT_TOKEN;
 client.login(token);
