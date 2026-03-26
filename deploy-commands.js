@@ -1,9 +1,12 @@
-const { REST, Routes } = require('discord.js');
-const { readdirSync } = require('node:fs');
-const { join } = require('node:path');
+import { REST, Routes } from 'discord.js';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { config } from 'dotenv';
+
+import { __dirname, getExportsFromModule } from './utils/filesystem.js';
 
 // Configure dotenv
-require('dotenv').config({ quiet: true });
+config({ quiet: true });
 
 // Grab all the command folders from the commands directory
 const commands = [];
@@ -12,22 +15,22 @@ const commandFolders = readdirSync(foldersPath);
 
 for (const folder of commandFolders) {
 	const commandsPath = join(foldersPath, folder);
-	const commandFiles = readdirSync(commandsPath).filter((file) => file.endsWith('.mjs') && !file.startsWith('_'));
+	const commandFiles = readdirSync(commandsPath).filter((file) => file.endsWith('.js') && !file.startsWith('_'));
 
 	// Grab the SlashCommandBuilder#toJSON() output of each command's data for deployment
 	for (const file of commandFiles) {
 		const filePath = join(commandsPath, file);
-		const command = require(filePath);
+		const command = await getExportsFromModule(filePath);
 		if ('data' in command && 'execute' in command) {
 			commands.push(command.data.toJSON());
 		} else {
-			console.log(`[WARNING] The command at ${filePath} is missing a required "data" or "execute" property.`);
+			console.warn(`[WARNING] The command at ${filePath} is missing a required "data" or "execute" property.`);
 		}
 	}
 }
 
 // Construct and prepare an instance of the REST module
-const token = process.env.DISCORD_JUNO_TOKEN;
+const token = process.env.DISCORD_BOT_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
 const rest = new REST().setToken(token);
 
