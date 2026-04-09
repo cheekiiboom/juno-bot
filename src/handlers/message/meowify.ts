@@ -21,7 +21,7 @@ async function execute(message: Message) {
 
   const result = meowify(message.content);
 
-  // Send if meowification changed the message.
+  // Send meowify if message was modified.
   if (result !== message.content) {
     messagesSinceMeowify.set(channelId, 0);
     await message.channel.send(result);
